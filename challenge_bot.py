@@ -8,6 +8,9 @@ import os
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
+
+ASTANA_TZ = ZoneInfo("Asia/Almaty")  # UTC+5
 from contextlib import contextmanager
 from telegram import Update
 from telegram.ext import (
@@ -85,17 +88,20 @@ def init_db():
 
 # ─── Вспомогательные функции ──────────────────────────────────────────────────
 
+def now_astana():
+    return datetime.now(ASTANA_TZ)
+
 def today_str() -> str:
-    return date.today().isoformat()
+    return now_astana().date().isoformat()
 
 def yesterday_str() -> str:
-    return (date.today() - timedelta(days=1)).isoformat()
+    return (now_astana().date() - timedelta(days=1)).isoformat()
 
 def month_str(d: str = None) -> str:
     return (d or today_str())[:7]
 
 def prev_month_str() -> str:
-    first_of_this = date.today().replace(day=1)
+    first_of_this = now_astana().date().replace(day=1)
     last_of_prev = first_of_this - timedelta(days=1)
     return last_of_prev.strftime("%Y-%m")
 
