@@ -352,6 +352,34 @@ async def cmd_addall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
+async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or update.effective_chat.type == "private":
+        return
+
+    chat_id = str(update.effective_chat.id)
+    user = update.effective_user
+    if not user or user.is_bot:
+        return
+
+    user_id = str(user.id)
+    name = user.full_name
+    username = f"@{user.username}" if user.username else name
+
+    sticker = msg.sticker
+    logger.info(f"Стикер от {name}: emoji={sticker.emoji}, set={sticker.set_name}, id={sticker.file_unique_id}")
+
+    # Авто-регистрация
+    with get_db() as conn:
+        cur = conn.cursor()
+        ensure_group(cur, chat_id)
+        ensure_member(cur, chat_id, user_id, name, username)
+
+    if sticker.emoji == "✅":
+        logger.info(f"✅ стикер от {name}, вызываю _mark_completion")
+        await _mark_completion(update, chat_id, user_id, name)
+
+
 async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text or update.effective_chat.type == "private":
@@ -559,8 +587,8 @@ def main():
     app.add_handler(CommandHandler("fines", cmd_fines))
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("help", cmd_help))
-    #app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
-    app.add_handler(MessageHandler(~filters.COMMAND, handle_any_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
+    app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
 
     # 19:00 UTC = 00:00 Астана (UTC+5)
     app.job_queue.run_daily(
