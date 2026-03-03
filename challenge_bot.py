@@ -386,7 +386,7 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg or not msg.text or update.effective_chat.type == "private":
+    if not msg or not msg.text:
         return
 
     chat_id = str(update.effective_chat.id)
@@ -398,8 +398,11 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     name = user.full_name
     username = f"@{user.username}" if user.username else name
 
-    # Логируем для отладки
-    logger.info(f"Сообщение от {name} ({user_id}): '{msg.text[:50]}'")
+    # Логируем ВСЁ включая личку
+    logger.info(f"Сообщение от {name} ({update.effective_chat.type}): '{msg.text[:50]}' entities={msg.entities}")
+
+    if update.effective_chat.type == "private":
+        return  # дальше не обрабатываем личку
 
     with get_db() as conn:
         cur = conn.cursor()
