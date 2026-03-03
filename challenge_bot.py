@@ -1,6 +1,12 @@
 """
 Челлендж бот для Telegram группы
 Хранение данных: PostgreSQL (Railway)
+
+Исправления:
+1. /history — не считает будущие дни как штраф для текущего месяца
+2. /addall — регистрирует всех участников группы через getChatAdministrators + invite
+3. Логирование входящих сообщений для отладки
+4. Улучшена авто-регистрация
 """
 
 import logging
@@ -12,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 ASTANA_TZ = ZoneInfo("Asia/Almaty")  # UTC+5
 from contextlib import contextmanager
-from telegram import Update
+from telegram import Update, ChatMember
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -23,8 +29,8 @@ from telegram.ext import (
 
 # ─── Настройки ────────────────────────────────────────────────────────────────
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]          # Из переменных окружения Railway
-DATABASE_URL = os.environ["DATABASE_URL"]    # Из переменных окружения Railway
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+DATABASE_URL = os.environ["DATABASE_URL"]
 CHALLENGE_EMOJI = "✅"
 FINE_AMOUNT = 1000
 
@@ -152,6 +158,7 @@ def count_fines_for_month(cur, chat_id: str, user_id: str, month: str, up_to: da
     month_start, month_end = month_date_range(month)
 
     if up_to is None:
+        # ИСПРАВЛЕНИЕ: никогда не считаем будущие дни
         up_to = min(month_end, date.today() - timedelta(days=1))
 
     start = max(joined, month_start)
@@ -276,7 +283,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💚 100 салауат\n\n"
         f"*Орындасаң — жібер:* {CHALLENGE_EMOJI}\n"
         f"*Өткізіп алғаны үшін штраф:* {FINE_AMOUNT:,} тг\n\n"
-        f"👥 Топтағы барлық жазған адам автоматты тіркеледі",
+        f"👥 Топтағы барлық жазған адам автоматты тіркеледі\n"
+        f"👥 Барлығын тіркеу үшін: /addall",
         parse_mode="Markdown"
     )
 
@@ -301,6 +309,49 @@ async def cmd_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_addall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Регистрирует всех администраторов группы + просит остальных написать /register"""
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Команда тек топта жұмыс істейді!")
+        return
+
+    chat_id = str(update.effective_chat.id)
+    registered = []
+
+    try:
+        # Получаем всех администраторов группы
+        admins = await context.bot.get_chat_administrators(int(chat_id))
+
+        with get_db() as conn:
+            cur = conn.cursor()
+            ensure_group(cur, chat_id)
+
+            for admin in admins:
+                user = admin.user
+                # Пропускаем ботов
+                if user.is_bot:
+                    continue
+                user_id = str(user.id)
+                name = user.full_name
+                username = f"@{user.username}" if user.username else name
+                ensure_member(cur, chat_id, user_id, name, username)
+                registered.append(name)
+
+    except Exception as e:
+        logger.error(f"Ошибка в cmd_addall: {e}")
+        await update.message.reply_text(f"Қате орын алды: {e}")
+        return
+
+    text = "👥 *Тіркелді:*\n"
+    for name in registered:
+        text += f"✅ {name}\n"
+    text += (
+        f"\n📢 Тізімде жоқтар — өздері `/register` деп жазсын!\n"
+        f"_(Бот тек әкімшілерді автоматты таниды)_"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
 async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text or update.effective_chat.type == "private":
@@ -308,12 +359,15 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     chat_id = str(update.effective_chat.id)
     user = update.effective_user
-    if not user:
+    if not user or user.is_bot:
         return
 
     user_id = str(user.id)
     name = user.full_name
     username = f"@{user.username}" if user.username else name
+
+    # Логируем для отладки
+    logger.info(f"Сообщение от {name} ({user_id}): '{msg.text[:50]}'")
 
     with get_db() as conn:
         cur = conn.cursor()
@@ -328,7 +382,9 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not existing:
         logger.info(f"Авто-зарегистрирован: {name} ({user_id}) в {chat_id}")
 
+    # Проверяем наличие ✅ в сообщении
     if CHALLENGE_EMOJI in msg.text:
+        logger.info(f"✅ обнаружен от {name}, вызываю _mark_completion")
         await _mark_completion(update, chat_id, user_id, name)
 
 
@@ -347,6 +403,7 @@ async def _mark_completion(update: Update, chat_id: str, user_id: str, name: str
             "INSERT INTO completions (chat_id, user_id, day) VALUES (%s, %s, %s)",
             (chat_id, user_id, today)
         )
+    logger.info(f"Completion записан: {name} ({user_id}) за {today}")
     await update.message.reply_text(
         f"✅ *{name}* нормативті орындады! Барак Аллах! 🌙",
         parse_mode="Markdown"
@@ -415,10 +472,14 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "📅 *Айлық штраф тарихы*\n\n"
         for month in months:
             _, month_end = month_date_range(month)
+
+            # ИСПРАВЛЕНИЕ: для текущего месяца не считаем будущие дни
+            effective_end = min(month_end, date.today() - timedelta(days=1))
+
             month_total = 0
             lines = []
             for m in members:
-                days = count_fines_for_month(cur, chat_id, m["user_id"], month, up_to=month_end)
+                days = count_fines_for_month(cur, chat_id, m["user_id"], month, up_to=effective_end)
                 if days > 0:
                     amount = days * FINE_AMOUNT
                     month_total += amount
@@ -437,6 +498,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 *Бот командалары:*\n\n"
         "`/start` — Ботты топта іске қосу\n"
         "`/register` — Челленджге тіркелу\n"
+        "`/addall` — Барлық әкімшілерді тіркеу\n"
         f"`{CHALLENGE_EMOJI}` — Нормативті белгілеу\n"
         "`/status` — Бүгін кім орындады\n"
         "`/fines` — Ағымдағы ай штрафтары\n"
@@ -492,6 +554,7 @@ def main():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("register", cmd_register))
+    app.add_handler(CommandHandler("addall", cmd_addall))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("fines", cmd_fines))
     app.add_handler(CommandHandler("history", cmd_history))
