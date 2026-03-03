@@ -354,7 +354,7 @@ async def cmd_addall(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg or update.effective_chat.type == "private":
+    if not msg:
         return
 
     chat_id = str(update.effective_chat.id)
@@ -367,17 +367,21 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = f"@{user.username}" if user.username else name
 
     sticker = msg.sticker
-    logger.info(f"Стикер от {name}: emoji={sticker.emoji}, set={sticker.set_name}, id={sticker.file_unique_id}")
+    logger.info(f"Стикер от {name}: emoji={sticker.emoji}, set={sticker.set_name}")
 
-    # Авто-регистрация
-    with get_db() as conn:
-        cur = conn.cursor()
-        ensure_group(cur, chat_id)
-        ensure_member(cur, chat_id, user_id, name, username)
+    # В группе — авто-регистрация
+    if update.effective_chat.type != "private":
+        with get_db() as conn:
+            cur = conn.cursor()
+            ensure_group(cur, chat_id)
+            ensure_member(cur, chat_id, user_id, name, username)
 
     if sticker.emoji == "✅":
         logger.info(f"✅ стикер от {name}, вызываю _mark_completion")
-        await _mark_completion(update, chat_id, user_id, name)
+        if update.effective_chat.type != "private":
+            await _mark_completion(update, chat_id, user_id, name)
+        else:
+            await update.message.reply_text(f"Стикер получен! emoji={sticker.emoji}")
 
 
 async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
