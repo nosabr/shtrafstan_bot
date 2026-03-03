@@ -559,7 +559,8 @@ def main():
     app.add_handler(CommandHandler("fines", cmd_fines))
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
+    #app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
+    app.add_handler(MessageHandler(~filters.COMMAND, handle_any_message))
 
     # 19:00 UTC = 00:00 Астана (UTC+5)
     app.job_queue.run_daily(
