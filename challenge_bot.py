@@ -1,16 +1,11 @@
 """
-Челлендж бот для Telegram группы
-Хранение данных: PostgreSQL (Railway)
-
-Исправления:
-1. /history — не считает будущие дни как штраф для текущего месяца
-2. /addall — регистрирует всех участников группы через getChatAdministrators + invite
-3. Логирование входящих сообщений для отладки
-4. Улучшена авто-регистрация
+Челлендж боты — Telegram тобы үшін
+Деректер сақтау: PostgreSQL (Railway)
 """
 
 import logging
 import os
+import random
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, date, timedelta
@@ -18,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 ASTANA_TZ = ZoneInfo("Asia/Almaty")  # UTC+5
 from contextlib import contextmanager
-from telegram import Update, ChatMember
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -34,6 +29,7 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 CHALLENGE_EMOJI = "✅"
 FINE_AMOUNT = 1000
 
+
 # ─── Логирование ──────────────────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -41,6 +37,21 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# ─── Аяттар мен хадистер ──────────────────────────────────────────────────────
+
+def load_quotes() -> list:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quotes.txt")
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+        logger.info(f"Дәйексөздер жүктелді: {len(lines)} жол")
+        return lines
+    except FileNotFoundError:
+        logger.warning("quotes.txt табылмады!")
+        return []
+
+QUOTES = load_quotes()
 
 # ─── База данных ──────────────────────────────────────────────────────────────
 
@@ -89,7 +100,7 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_completions_day
                 ON completions(chat_id, day);
         """)
-    logger.info("База данных инициализирована.")
+    logger.info("Дерекқор инициализацияланды.")
 
 
 # ─── Вспомогательные функции ──────────────────────────────────────────────────
@@ -158,7 +169,6 @@ def count_fines_for_month(cur, chat_id: str, user_id: str, month: str, up_to: da
     month_start, month_end = month_date_range(month)
 
     if up_to is None:
-        # ИСПРАВЛЕНИЕ: никогда не считаем будущие дни
         up_to = min(month_end, date.today() - timedelta(days=1))
 
     start = max(joined, month_start)
@@ -186,6 +196,23 @@ def get_active_months(cur, chat_id: str) -> list:
         months.insert(0, current)
     return months
 
+def get_streak(cur, chat_id: str, user_id: str) -> int:
+    """Считает количество дней подряд включая сегодня."""
+    today = now_astana().date()
+    streak = 0
+    check_day = today
+    while True:
+        cur.execute(
+            "SELECT 1 FROM completions WHERE chat_id = %s AND user_id = %s AND day = %s",
+            (chat_id, user_id, check_day.isoformat())
+        )
+        if cur.fetchone():
+            streak += 1
+            check_day -= timedelta(days=1)
+        else:
+            break
+    return streak
+
 
 # ─── Формирование текстов отчётов ─────────────────────────────────────────────
 
@@ -199,7 +226,9 @@ def build_daily_report(cur, chat_id: str, day: str) -> str:
 
     for m in members:
         if m["user_id"] in completed:
-            done_list.append(f"✅ {m['name']}")
+            streak = get_streak(cur, chat_id, m["user_id"])
+            streak_text = f" ({streak}🔥)" if streak > 1 else ""
+            done_list.append(f"✅ {m['name']}{streak_text}")
         else:
             fined_list.append(f"❌ {m['name']} (-{FINE_AMOUNT:,} тг)")
 
@@ -310,7 +339,6 @@ async def cmd_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_addall(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Регистрирует всех администраторов группы + просит остальных написать /register"""
     if update.effective_chat.type == "private":
         await update.message.reply_text("Команда тек топта жұмыс істейді!")
         return
@@ -319,7 +347,6 @@ async def cmd_addall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     registered = []
 
     try:
-        # Получаем всех администраторов группы
         admins = await context.bot.get_chat_administrators(int(chat_id))
 
         with get_db() as conn:
@@ -328,7 +355,6 @@ async def cmd_addall(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             for admin in admins:
                 user = admin.user
-                # Пропускаем ботов
                 if user.is_bot:
                     continue
                 user_id = str(user.id)
@@ -338,7 +364,7 @@ async def cmd_addall(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 registered.append(name)
 
     except Exception as e:
-        logger.error(f"Ошибка в cmd_addall: {e}")
+        logger.error(f"cmd_addall қатесі: {e}")
         await update.message.reply_text(f"Қате орын алды: {e}")
         return
 
@@ -367,21 +393,16 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = f"@{user.username}" if user.username else name
 
     sticker = msg.sticker
-    logger.info(f"Стикер от {name}: emoji={sticker.emoji}, set={sticker.set_name}")
+    logger.info(f"Стикер: {name}, emoji={sticker.emoji}, set={sticker.set_name}")
 
-    # В группе — авто-регистрация
     if update.effective_chat.type != "private":
         with get_db() as conn:
             cur = conn.cursor()
             ensure_group(cur, chat_id)
             ensure_member(cur, chat_id, user_id, name, username)
 
-    if sticker.emoji == "✅":
-        logger.info(f"✅ стикер от {name}, вызываю _mark_completion")
-        if update.effective_chat.type != "private":
+        if sticker.emoji == "✅":
             await _mark_completion(update, chat_id, user_id, name)
-        else:
-            await update.message.reply_text(f"Стикер получен! emoji={sticker.emoji}")
 
 
 async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -398,11 +419,10 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     name = user.full_name
     username = f"@{user.username}" if user.username else name
 
-    # Логируем ВСЁ включая личку
-    logger.info(f"Сообщение от {name} ({update.effective_chat.type}): '{msg.text[:50]}' entities={msg.entities}")
+    logger.info(f"Хабар {name} ({update.effective_chat.type}): '{msg.text[:50]}'")
 
     if update.effective_chat.type == "private":
-        return  # дальше не обрабатываем личку
+        return
 
     with get_db() as conn:
         cur = conn.cursor()
@@ -415,11 +435,9 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ensure_member(cur, chat_id, user_id, name, username)
 
     if not existing:
-        logger.info(f"Авто-зарегистрирован: {name} ({user_id}) в {chat_id}")
+        logger.info(f"Авто-тіркелді: {name} ({user_id}) in {chat_id}")
 
-    # Проверяем наличие ✅ в сообщении
     if CHALLENGE_EMOJI in msg.text:
-        logger.info(f"✅ обнаружен от {name}, вызываю _mark_completion")
         await _mark_completion(update, chat_id, user_id, name)
 
 
@@ -432,17 +450,12 @@ async def _mark_completion(update: Update, chat_id: str, user_id: str, name: str
             (chat_id, user_id, today)
         )
         if cur.fetchone():
-            await update.message.reply_text(f"✅ {name}, сен бүгін бұрын белгіледің! Машалла! 🌟")
             return
         cur.execute(
             "INSERT INTO completions (chat_id, user_id, day) VALUES (%s, %s, %s)",
             (chat_id, user_id, today)
         )
-    logger.info(f"Completion записан: {name} ({user_id}) за {today}")
-    await update.message.reply_text(
-        f"✅ *{name}* нормативті орындады! Барак Аллах! 🌙",
-        parse_mode="Markdown"
-    )
+    logger.info(f"Белгіленді: {name} ({user_id}) — {today}")
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -455,13 +468,14 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Тіркелген қатысушылар жоқ. /register деп жазыңыз")
             return
         completed = get_completions_for_day(cur, chat_id, today)
-
-    done_list, not_done_list = [], []
-    for m in members:
-        if m["user_id"] in completed:
-            done_list.append(f"✅ {m['name']}")
-        else:
-            not_done_list.append(f"❌ {m['name']}")
+        done_list, not_done_list = [], []
+        for m in members:
+            if m["user_id"] in completed:
+                streak = get_streak(cur, chat_id, m["user_id"])
+                streak_text = f" ({streak}🔥)" if streak > 1 else ""
+                done_list.append(f"✅ {m['name']}{streak_text}")
+            else:
+                not_done_list.append(f"❌ {m['name']}")
 
     text = f"📊 *Бүгінгі күй — {today}*\n\n"
     if done_list:
@@ -507,10 +521,7 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "📅 *Айлық штраф тарихы*\n\n"
         for month in months:
             _, month_end = month_date_range(month)
-
-            # ИСПРАВЛЕНИЕ: для текущего месяца не считаем будущие дни
             effective_end = min(month_end, date.today() - timedelta(days=1))
-
             month_total = 0
             lines = []
             for m in members:
@@ -528,6 +539,15 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
+async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not QUOTES:
+        await update.message.reply_text("quotes.txt бос немесе табылмады.")
+        return
+    quote = random.choice(QUOTES)
+    text = f"🌅 *Таңғы дәйексөз*\n\n✨ {quote}\n\nБүгінгі нормативіңді орындауды ұмытпа! 💚"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🤖 *Бот командалары:*\n\n"
@@ -538,6 +558,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/status` — Бүгін кім орындады\n"
         "`/fines` — Ағымдағы ай штрафтары\n"
         "`/history` — Айлық штраф тарихы\n"
+        "`/daily` — Таңғы дәйексөз\n"
         "`/help` — Бұл анықтама\n"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -547,7 +568,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def job_daily_report(context: ContextTypes.DEFAULT_TYPE):
     yesterday = yesterday_str()
-    logger.info(f"Ежедневный отчёт за {yesterday}")
+    logger.info(f"Күнделікті есеп: {yesterday}")
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT chat_id FROM groups WHERE active = TRUE")
@@ -560,12 +581,12 @@ async def job_daily_report(context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
             except Exception as e:
-                logger.error(f"Ошибка отправки ежедневного отчёта в {chat_id}: {e}")
+                logger.error(f"Күнделікті есеп қатесі {chat_id}: {e}")
 
 
 async def job_monthly_report(context: ContextTypes.DEFAULT_TYPE):
     prev_month = prev_month_str()
-    logger.info(f"Месячный отчёт за {prev_month}")
+    logger.info(f"Ай есебі: {prev_month}")
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT chat_id FROM groups WHERE active = TRUE")
@@ -578,7 +599,62 @@ async def job_monthly_report(context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
             except Exception as e:
-                logger.error(f"Ошибка отправки месячного отчёта в {chat_id}: {e}")
+                logger.error(f"Ай есебі қатесі {chat_id}: {e}")
+
+
+async def job_reminder(context: ContextTypes.DEFAULT_TYPE):
+    today = today_str()
+    logger.info(f"Еске салу: {today}")
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT chat_id FROM groups WHERE active = TRUE")
+        groups = cur.fetchall()
+        for group in groups:
+            chat_id = group["chat_id"]
+            members = get_members(cur, chat_id)
+            if not members:
+                continue
+            completed = get_completions_for_day(cur, chat_id, today)
+            not_done = [m for m in members if m["user_id"] not in completed]
+            if not not_done:
+                continue
+            mentions = " ".join(
+                m["username"] if m["username"] and m["username"].startswith("@") else m["name"]
+                for m in not_done
+            )
+            text = (
+                f"⏰ *Еске салу!*\n\n"
+                f"{mentions}\n\n"
+                f"Бүгінгі нормативті әлі орындамадыңдар!\n"
+                f"📖 1 бет Құран\n"
+                f"📚 1 бет рухани кітап\n"
+                f"📿 1 бет Жаухарат\n"
+                f"🤲 1 тасбихат\n"
+                f"💚 100 салауат\n\n"
+                f"Орындасаң — {CHALLENGE_EMOJI} жібер!"
+            )
+            try:
+                await context.bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Еске салу қатесі {chat_id}: {e}")
+
+
+async def job_morning_quote(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Таңғы дәйексөз")
+    if not QUOTES:
+        return
+    quote = random.choice(QUOTES)
+    text = f"🌅 *Ассаламу алейкум!*\n\n✨ {quote}\n\nБүгінгі нормативіңді орындауды ұмытпа! 💚"
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT chat_id FROM groups WHERE active = TRUE")
+        groups = cur.fetchall()
+        for group in groups:
+            chat_id = group["chat_id"]
+            try:
+                await context.bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Таңғы хабар қатесі {chat_id}: {e}")
 
 
 # ─── Запуск ───────────────────────────────────────────────────────────────────
@@ -593,6 +669,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("fines", cmd_fines))
     app.add_handler(CommandHandler("history", cmd_history))
+    app.add_handler(CommandHandler("daily", cmd_daily))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
     app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
@@ -608,8 +685,18 @@ def main():
         when=datetime.strptime("19:05", "%H:%M").time(),
         day=1,
     )
+    # 16:00 UTC = 21:00 Астана — еске салу
+    app.job_queue.run_daily(
+        job_reminder,
+        time=datetime.strptime("16:00", "%H:%M").time(),
+    )
+    # 03:00 UTC = 08:00 Астана — таңғы дәйексөз
+    app.job_queue.run_daily(
+        job_morning_quote,
+        time=datetime.strptime("03:00", "%H:%M").time(),
+    )
 
-    logger.info("Бот запущен!")
+    logger.info("Бот іске қосылды!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
