@@ -477,7 +477,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 not_done_list.append(f"❌ {m['name']}")
 
-    text = f"📊 *Бүгінгі күй — {today}*\n\n"
+    text = f"📊 *Бүгінгі күн — {today}*\n\n"
     if done_list:
         text += "🟢 *Орындады:*\n" + "\n".join(done_list) + "\n\n"
     if not_done_list:
