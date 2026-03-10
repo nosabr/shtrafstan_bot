@@ -249,8 +249,9 @@ def build_daily_report(cur, chat_id: str, day: str) -> str:
         text += "🌟 *Бәрі орындады! Машалла!*\n\n"
 
     current_month = month_str(day)
+    today = now_astana().date()
     month_total = sum(
-        count_fines_for_month(cur, chat_id, m["user_id"], current_month) * FINE_AMOUNT
+        count_fines_for_month(cur, chat_id, m["user_id"], current_month, up_to=today) * FINE_AMOUNT
         for m in members
     )
     text += f"💰 *{current_month} айының жиналған штрафы: {month_total:,} тг*"
@@ -498,6 +499,28 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Команда тек топта жұмыс істейді!")
+        return
+    chat_id = str(update.effective_chat.id)
+    today = today_str()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE members SET joined_at = %s WHERE chat_id = %s",
+            (today, chat_id)
+        )
+        cur.execute("SELECT COUNT(*) as cnt FROM members WHERE chat_id = %s", (chat_id,))
+        count = cur.fetchone()["cnt"]
+    await update.message.reply_text(
+        f"🔄 *Штрафтар тазаланды!*\n\n"
+        f"Топтағы {count} қатысушының тіркелу күні *{today}* деп жаңартылды.\n"
+        f"Бұрынғы штрафтар есепке алынбайды.",
+        parse_mode="Markdown"
+    )
+
+
 async def cmd_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Тестовая команда — сразу отправляет напоминание."""
     if update.effective_chat.type == "private":
@@ -525,6 +548,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/history` — Айлық штраф тарихы\n"
         "`/daily` — Таңғы дәйексөз\n"
         "`/notify` — Еске салуды қазір жіберу (тест)\n"
+        "`/reset` — Барлықтың штрафтарын тазалау (айды қайта бастау)\n"
         "`/help` — Бұл анықтама\n"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -698,6 +722,7 @@ def main():
     app.add_handler(CommandHandler("fines", cmd_fines))
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("daily", cmd_daily))
+    app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("notify", cmd_notify))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
