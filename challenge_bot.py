@@ -511,6 +511,11 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Команда тек топта жұмыс істейді!")
         return
     chat_id = str(update.effective_chat.id)
+    user_id = update.effective_user.id
+    member = await context.bot.get_chat_member(int(chat_id), user_id)
+    if member.status not in ("administrator", "creator"):
+        await update.message.reply_text("⛔ Бұл команда тек әкімшілерге қол жетімді!")
+        return
     today = today_str()
     with get_db() as conn:
         cur = conn.cursor()
