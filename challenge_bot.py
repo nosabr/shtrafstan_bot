@@ -299,6 +299,12 @@ def build_monthly_report(cur, chat_id: str, month: str) -> str:
     return text
 
 
+def escape_md(text: str) -> str:
+    """Экранирует спецсимволы Markdown v1."""
+    for ch in ['_', '*', '[', '`']:
+        text = text.replace(ch, f'\\{ch}')
+    return text
+
 def build_reminder_text(cur, chat_id: str) -> str | None:
     today = today_str()
     members = get_members(cur, chat_id)
@@ -309,7 +315,8 @@ def build_reminder_text(cur, chat_id: str) -> str | None:
     if not not_done:
         return None
     mentions = " ".join(
-        m["username"] if m["username"] and m["username"].startswith("@") else m["name"]
+        m["username"] if m["username"] and m["username"].startswith("@")
+        else escape_md(m["name"])
         for m in not_done
     )
     return (
