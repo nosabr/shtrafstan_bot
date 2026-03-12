@@ -534,65 +534,79 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-
-async def cmd_recalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Пересчитывает дату галочек на основе done_at. /recalc [дней=1]"""
+async def cmd_resetday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обнуляет все галочки за сегодня в группе. Только для админов."""
     if update.effective_chat.type == "private":
         await update.message.reply_text("Команда тек топта жұмыс істейді!")
         return
     chat_id = str(update.effective_chat.id)
-    user_id = update.effective_user.id
-    member = await context.bot.get_chat_member(int(chat_id), user_id)
+    member = await context.bot.get_chat_member(int(chat_id), update.effective_user.id)
+    if member.status not in ("administrator", "creator"):
+        await update.message.reply_text("⛔ Бұл команда тек әкімшілерге қол жетімді!")
+        return
+    today = today_str()
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM completions WHERE chat_id = %s AND day = %s",
+            (chat_id, today)
+        )
+        deleted = cur.rowcount
+    await update.message.reply_text(
+        f"🗑 *Бүгінгі галочкалар өшірілді!*\n\n"
+        f"Күн: {today}\n"
+        f"Өшірілді: {deleted} жазба",
+        parse_mode="Markdown"
+    )
+
+
+async def cmd_deleteday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/deleteday YYYY-MM-DD — добавляет всем галочку за указанный день. Только для админов."""
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Команда тек топта жұмыс істейді!")
+        return
+    chat_id = str(update.effective_chat.id)
+    member = await context.bot.get_chat_member(int(chat_id), update.effective_user.id)
     if member.status not in ("administrator", "creator"):
         await update.message.reply_text("⛔ Бұл команда тек әкімшілерге қол жетімді!")
         return
 
-    # Парсим аргумент — кол-во дней назад
     args = context.args
-    try:
-        days_back = int(args[0]) if args else 1
-        if days_back < 1 or days_back > 365:
-            raise ValueError
-    except (ValueError, IndexError):
-        await update.message.reply_text("⛔ Қате: /recalc 3 — санды дұрыс жаз (1-365)")
-        return
-
-    today = now_astana().date()
-    since = today - timedelta(days=days_back - 1)
+    if not args:
+        today = today_str()
+        target_day = today
+    else:
+        try:
+            date.fromisoformat(args[0])
+            target_day = args[0]
+        except ValueError:
+            await update.message.reply_text("⛔ Қате формат. Мысалы: /deleteday 2026-03-11")
+            return
 
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute(
-            """SELECT chat_id, user_id, day, done_at FROM completions
-               WHERE chat_id = %s AND day >= %s""",
-            (chat_id, since.isoformat())
-        )
-        rows = cur.fetchall()
-        fixed = 0
-        skipped = 0
-        for row in rows:
-            correct_day = row["done_at"].astimezone(ASTANA_TZ).date()
-            if row["day"] != correct_day:
-                cur.execute(
-                    "SELECT 1 FROM completions WHERE chat_id=%s AND user_id=%s AND day=%s",
-                    (chat_id, row["user_id"], correct_day.isoformat())
-                )
-                if cur.fetchone():
-                    skipped += 1
-                    continue
-                cur.execute(
-                    "UPDATE completions SET day=%s WHERE chat_id=%s AND user_id=%s AND day=%s",
-                    (correct_day.isoformat(), chat_id, row["user_id"], row["day"])
-                )
-                fixed += 1
+        members = get_members(cur, chat_id)
+        if not members:
+            await update.message.reply_text("Тіркелген қатысушылар жоқ.")
+            return
+        added = 0
+        for m in members:
+            cur.execute(
+                """INSERT INTO completions (chat_id, user_id, day)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT DO NOTHING""",
+                (chat_id, m["user_id"], target_day)
+            )
+            if cur.rowcount:
+                added += 1
 
     await update.message.reply_text(
-        f"✅ *Қайта есептелді!*\n\n"
-        f"Кезең: {since} — {today} ({days_back} күн)\n"
-        f"Түзетілді: {fixed} жазба\n"
-        f"Өткізілді (қайталану): {skipped} жазба",
+        f"✅ *Барлығына галочка қосылды!*\n\n"
+        f"Күн: {target_day}\n"
+        f"Қосылды: {added} қатысушы",
         parse_mode="Markdown"
     )
+
 
 async def cmd_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Тестовая команда — сразу отправляет напоминание."""
@@ -622,7 +636,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/daily` — Таңғы дәйексөз\n"
         "`/notify` — Еске салуды қазір жіберу (тест)\n"
         "`/reset` — Барлықтың штрафтарын тазалау (айды қайта бастау)\n"
-        "`/recalc` — Галочкалардың күнін done_at бойынша түзету (админ)\n"
+        "`/resetday` — Бүгінгі барлық галочкаларды өшіру (админ)\n"
+        "`/deleteday [YYYY-MM-DD]` — Барлығына галочка қосу (админ)\n"
         "`/help` — Бұл анықтама\n"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -807,7 +822,9 @@ def main():
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("daily", cmd_daily))
     app.add_handler(CommandHandler("reset", cmd_reset))
-    app.add_handler(CommandHandler("recalc", cmd_recalc))
+    app.add_handler(CommandHandler("resetday", cmd_resetday))
+    app.add_handler(CommandHandler("deleteday", cmd_deleteday))
+    app.add_handler(CommandHandler("fixday", cmd_fixday))
     app.add_handler(CommandHandler("notify", cmd_notify))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
