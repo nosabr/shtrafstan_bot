@@ -314,13 +314,14 @@ def build_reminder_text(cur, chat_id: str) -> str | None:
     not_done = [m for m in members if m["user_id"] not in completed]
     if not not_done:
         return None
+    # Используем username для тега, иначе просто имя — без Markdown чтобы не было ошибок парсинга
     mentions = " ".join(
         m["username"] if m["username"] and m["username"].startswith("@")
-        else escape_md(m["name"])
+        else m["name"]
         for m in not_done
     )
     return (
-        f"⏰ *Еске салу!*\n\n"
+        f"⏰ Еске салу!\n\n"
         f"{mentions}\n\n"
         f"Бүгінгі нормативті әлі орындамадыңдар!\n"
         f"📖 1 бет Құран\n"
@@ -543,7 +544,7 @@ async def cmd_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
         text = build_reminder_text(cur, chat_id)
     if text:
-        await update.message.reply_text(text, parse_mode="Markdown")
+        await update.message.reply_text(text)
     else:
         await update.message.reply_text("🌟 Бәрі орындады, еске салу жоқ!")
 
@@ -697,7 +698,7 @@ async def job_reminder(context: ContextTypes.DEFAULT_TYPE):
             if not text:
                 continue
             try:
-                await context.bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
+                await context.bot.send_message(chat_id=int(chat_id), text=text)
             except Exception as e:
                 logger.error(f"Еске салу қатесі {chat_id}: {e}")
 
