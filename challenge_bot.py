@@ -249,9 +249,9 @@ def build_daily_report(cur, chat_id: str, day: str) -> str:
         text += "🌟 *Бәрі орындады! Машалла!*\n\n"
 
     current_month = month_str(day)
-    today = now_astana().date()
+    report_date = date.fromisoformat(day)
     month_total = sum(
-        count_fines_for_month(cur, chat_id, m["user_id"], current_month, up_to=today) * FINE_AMOUNT
+        count_fines_for_month(cur, chat_id, m["user_id"], current_month, up_to=report_date) * FINE_AMOUNT
         for m in members
     )
     text += f"💰 *{current_month} айының жиналған штрафы: {month_total:,} тг*"
@@ -534,6 +534,66 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
+async def cmd_recalc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пересчитывает дату галочек на основе done_at. /recalc [дней=1]"""
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Команда тек топта жұмыс істейді!")
+        return
+    chat_id = str(update.effective_chat.id)
+    user_id = update.effective_user.id
+    member = await context.bot.get_chat_member(int(chat_id), user_id)
+    if member.status not in ("administrator", "creator"):
+        await update.message.reply_text("⛔ Бұл команда тек әкімшілерге қол жетімді!")
+        return
+
+    # Парсим аргумент — кол-во дней назад
+    args = context.args
+    try:
+        days_back = int(args[0]) if args else 1
+        if days_back < 1 or days_back > 365:
+            raise ValueError
+    except (ValueError, IndexError):
+        await update.message.reply_text("⛔ Қате: /recalc 3 — санды дұрыс жаз (1-365)")
+        return
+
+    today = now_astana().date()
+    since = today - timedelta(days=days_back - 1)
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT chat_id, user_id, day, done_at FROM completions
+               WHERE chat_id = %s AND day >= %s""",
+            (chat_id, since.isoformat())
+        )
+        rows = cur.fetchall()
+        fixed = 0
+        skipped = 0
+        for row in rows:
+            correct_day = row["done_at"].astimezone(ASTANA_TZ).date()
+            if row["day"] != correct_day:
+                cur.execute(
+                    "SELECT 1 FROM completions WHERE chat_id=%s AND user_id=%s AND day=%s",
+                    (chat_id, row["user_id"], correct_day.isoformat())
+                )
+                if cur.fetchone():
+                    skipped += 1
+                    continue
+                cur.execute(
+                    "UPDATE completions SET day=%s WHERE chat_id=%s AND user_id=%s AND day=%s",
+                    (correct_day.isoformat(), chat_id, row["user_id"], row["day"])
+                )
+                fixed += 1
+
+    await update.message.reply_text(
+        f"✅ *Қайта есептелді!*\n\n"
+        f"Кезең: {since} — {today} ({days_back} күн)\n"
+        f"Түзетілді: {fixed} жазба\n"
+        f"Өткізілді (қайталану): {skipped} жазба",
+        parse_mode="Markdown"
+    )
+
 async def cmd_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Тестовая команда — сразу отправляет напоминание."""
     if update.effective_chat.type == "private":
@@ -562,6 +622,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/daily` — Таңғы дәйексөз\n"
         "`/notify` — Еске салуды қазір жіберу (тест)\n"
         "`/reset` — Барлықтың штрафтарын тазалау (айды қайта бастау)\n"
+        "`/recalc` — Галочкалардың күнін done_at бойынша түзету (админ)\n"
         "`/help` — Бұл анықтама\n"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -632,20 +693,30 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def _mark_completion(update: Update, chat_id: str, user_id: str, name: str):
-    today = today_str()
+    # Используем дату сообщения (в Astana TZ), а не текущую дату.
+    # Это защищает от ситуации когда бот упал и обрабатывает старые сообщения.
+    msg_date = update.message.date.astimezone(ASTANA_TZ).date()
+    today = now_astana().date()
+
+    # Засчитываем только если сообщение не старше 1 дня
+    if (today - msg_date).days > 1:
+        logger.info(f"Пропущено старое сообщение: {name} ({user_id}) — {msg_date}")
+        return
+
+    day = msg_date.isoformat()
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT 1 FROM completions WHERE chat_id = %s AND user_id = %s AND day = %s",
-            (chat_id, user_id, today)
+            (chat_id, user_id, day)
         )
         if cur.fetchone():
             return
         cur.execute(
             "INSERT INTO completions (chat_id, user_id, day) VALUES (%s, %s, %s)",
-            (chat_id, user_id, today)
+            (chat_id, user_id, day)
         )
-    logger.info(f"Белгіленді: {name} ({user_id}) — {today}")
+    logger.info(f"Белгіленді: {name} ({user_id}) — {day}")
 
 
 # ─── Автоматические задания ───────────────────────────────────────────────────
@@ -736,6 +807,7 @@ def main():
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("daily", cmd_daily))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("recalc", cmd_recalc))
     app.add_handler(CommandHandler("notify", cmd_notify))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
