@@ -824,7 +824,6 @@ def main():
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("resetday", cmd_resetday))
     app.add_handler(CommandHandler("deleteday", cmd_deleteday))
-    app.add_handler(CommandHandler("fixday", cmd_fixday))
     app.add_handler(CommandHandler("notify", cmd_notify))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
