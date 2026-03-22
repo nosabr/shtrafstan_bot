@@ -608,6 +608,55 @@ async def cmd_deleteday(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/kick @username — удаляет участника и все его данные. Только для админов."""
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Команда тек топта жұмыс істейді!")
+        return
+    chat_id = str(update.effective_chat.id)
+    member = await context.bot.get_chat_member(int(chat_id), update.effective_user.id)
+    if member.status not in ("administrator", "creator"):
+        await update.message.reply_text("⛔ Бұл команда тек әкімшілерге қол жетімді!")
+        return
+
+    if not context.args:
+        await update.message.reply_text("⛔ Қате: /kick @username немесе /kick username")
+        return
+
+    target = context.args[0].lstrip("@")
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        # Ищем по username или по имени
+        cur.execute(
+            """SELECT user_id, name, username FROM members
+               WHERE chat_id = %s AND (
+                   LOWER(username) = LOWER(%s) OR
+                   LOWER(username) = LOWER(%s) OR
+                   LOWER(name) = LOWER(%s)
+               )""",
+            (chat_id, target, f"@{target}", target)
+        )
+        row = cur.fetchone()
+        if not row:
+            await update.message.reply_text(f"⛔ Қатысушы табылмады: {target}")
+            return
+
+        user_id = row["user_id"]
+        name = row["name"]
+
+        # Удаляем completions и members
+        cur.execute("DELETE FROM completions WHERE chat_id = %s AND user_id = %s", (chat_id, user_id))
+        deleted_completions = cur.rowcount
+        cur.execute("DELETE FROM members WHERE chat_id = %s AND user_id = %s", (chat_id, user_id))
+
+    await update.message.reply_text(
+        f"🗑 *{name}* челленджден шығарылды\n\n"
+        f"Өшірілді: {deleted_completions} галочка жазбасы",
+        parse_mode="Markdown"
+    )
+
+
 async def cmd_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Тестовая команда — сразу отправляет напоминание."""
     if update.effective_chat.type == "private":
@@ -637,6 +686,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/notify` — Еске салуды қазір жіберу (тест)\n"
         "`/reset` — Барлықтың штрафтарын тазалау (айды қайта бастау)\n"
         "`/resetday` — Бүгінгі барлық галочкаларды өшіру (админ)\n"
+        "`/kick @username` — Қатысушыны және оның барлық деректерін өшіру (админ)\n"
         "`/deleteday [YYYY-MM-DD]` — Барлығына галочка қосу (админ)\n"
         "`/help` — Бұл анықтама\n"
     )
@@ -823,7 +873,9 @@ def main():
     app.add_handler(CommandHandler("daily", cmd_daily))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("resetday", cmd_resetday))
+    app.add_handler(CommandHandler("kick", cmd_kick))
     app.add_handler(CommandHandler("deleteday", cmd_deleteday))
+    app.add_handler(CommandHandler("fixday", cmd_fixday))
     app.add_handler(CommandHandler("notify", cmd_notify))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
