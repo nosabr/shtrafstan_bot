@@ -26,6 +26,13 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
 CHALLENGE_EMOJI = "✅"
 FINE_AMOUNT = 1000
+DEFAULT_NORM = (
+    "📖 1 бет Құран\n"
+    "📚 1 бет рухани кітап\n"
+    "📿 1 бет Жаухарат\n"
+    "🤲 1 тасбихат\n"
+    "💚 100 салауат"
+)
 ASTANA_TZ = ZoneInfo("Asia/Almaty")  # UTC+5
 UTC = ZoneInfo("UTC")
 
@@ -108,6 +115,11 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_completions_day
                 ON completions(chat_id, day);
+            CREATE TABLE IF NOT EXISTS group_settings (
+                chat_id     TEXT PRIMARY KEY,
+                norm_text   TEXT,
+                FOREIGN KEY (chat_id) REFERENCES groups(chat_id)
+            );
         """)
     logger.info("Дерекқор инициализацияланды.")
 
@@ -305,6 +317,14 @@ def escape_md(text: str) -> str:
         text = text.replace(ch, f'\\{ch}')
     return text
 
+def get_norm(cur, chat_id: str) -> str:
+    cur.execute("SELECT norm_text FROM group_settings WHERE chat_id = %s", (chat_id,))
+    row = cur.fetchone()
+    if row and row["norm_text"]:
+        return row["norm_text"]
+    return DEFAULT_NORM
+
+
 def build_reminder_text(cur, chat_id: str) -> str | None:
     today = today_str()
     members = get_members(cur, chat_id)
@@ -320,15 +340,12 @@ def build_reminder_text(cur, chat_id: str) -> str | None:
         else m["name"]
         for m in not_done
     )
+    norm = get_norm(cur, chat_id)
     return (
         f"⏰ Еске салу!\n\n"
         f"{mentions}\n\n"
         f"Бүгінгі нормативті әлі орындамадыңдар!\n"
-        f"📖 1 бет Құран\n"
-        f"📚 1 бет рухани кітап\n"
-        f"📿 1 бет Жаухарат\n"
-        f"🤲 1 тасбихат\n"
-        f"💚 100 салауат\n\n"
+        f"{norm}\n\n"
         f"Орындасаң — {CHALLENGE_EMOJI} жібер!"
     )
 
@@ -608,6 +625,54 @@ async def cmd_deleteday(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_setnorm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setnorm <текст> — устанавливает норматив для группы. Только для админов."""
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Команда тек топта жұмыс істейді!")
+        return
+    chat_id = str(update.effective_chat.id)
+    member = await context.bot.get_chat_member(int(chat_id), update.effective_user.id)
+    if member.status not in ("administrator", "creator"):
+        await update.message.reply_text("⛔ Бұл команда тек әкімшілерге қол жетімді!")
+        return
+
+    if not context.args:
+        # Показать текущий норматив
+        with get_db() as conn:
+            cur = conn.cursor()
+            norm = get_norm(cur, chat_id)
+        await update.message.reply_text(
+            f"📋 *Ағымдағы норматив:*\n\n{norm}\n\n"
+            f"Өзгерту үшін: `/setnorm жаңа мәтін`\n"
+            f"Әдепкіге қайту үшін: `/setnorm default`",
+            parse_mode="Markdown"
+        )
+        return
+
+    new_norm = " ".join(context.args).replace("\\n", "\n")
+
+    if new_norm.lower() == "default":
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM group_settings WHERE chat_id = %s", (chat_id,))
+        await update.message.reply_text("✅ Норматив әдепкіге қайтарылды!")
+        return
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        ensure_group(cur, chat_id)
+        cur.execute(
+            """INSERT INTO group_settings (chat_id, norm_text)
+               VALUES (%s, %s)
+               ON CONFLICT (chat_id) DO UPDATE SET norm_text = EXCLUDED.norm_text""",
+            (chat_id, new_norm)
+        )
+    await update.message.reply_text(
+        f"✅ *Норматив сақталды!*\n\n{new_norm}",
+        parse_mode="Markdown"
+    )
+
+
 async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/kick @username — удаляет участника и все его данные. Только для админов."""
     if update.effective_chat.type == "private":
@@ -687,6 +752,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/reset` — Барлықтың штрафтарын тазалау (айды қайта бастау)\n"
         "`/resetday` — Бүгінгі барлық галочкаларды өшіру (админ)\n"
         "`/kick @username` — Қатысушыны және оның барлық деректерін өшіру (админ)\n"
+        "`/setnorm <мәтін>` — Топтың нормативін орнату (админ)\n"
         "`/deleteday [YYYY-MM-DD]` — Барлығына галочка қосу (админ)\n"
         "`/help` — Бұл анықтама\n"
     )
@@ -874,6 +940,7 @@ def main():
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("resetday", cmd_resetday))
     app.add_handler(CommandHandler("kick", cmd_kick))
+    app.add_handler(CommandHandler("setnorm", cmd_setnorm))
     app.add_handler(CommandHandler("deleteday", cmd_deleteday))
     app.add_handler(CommandHandler("notify", cmd_notify))
     app.add_handler(CommandHandler("help", cmd_help))
